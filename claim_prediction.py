@@ -12,7 +12,7 @@ from sklearn.metrics import roc_auc_score, precision_recall_fscore_support  #, c
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
-from sklearn.svm import LinearSVC  #, SVC
+from sklearn.svm import LinearSVC, SVC
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 from sklearn.ensemble import StackingClassifier
@@ -40,12 +40,11 @@ def _logistic_regression_feature_importance(model, X, y):
 def _logistic_regression_model(X_train, y_train, X_val, y_val, class_weight=None):
     params = {
         'penalty': ['l2'],
-        'C': [100],  # [10, 100, 1000],
+        'C': [1, 10],  # [10, 100, 1000],
         'solver': ['lbfgs', 'sag'],  # ['lbfgs', 'sag', 'saga'],
-        'max_iter': [3000],
         # 'class_weight': [None, 'balanced'],
     }
-    model = LogisticRegression(class_weight=class_weight, random_state=SEED, n_jobs=N_JOBS, verbose=VERBOSE)
+    model = LogisticRegression(max_iter=4000, class_weight=class_weight, random_state=SEED, n_jobs=N_JOBS, verbose=VERBOSE)
     
     return _fit(X_train, y_train, X_val, y_val, model, params=params, 
                 feature_importance_fn=_logistic_regression_feature_importance)
@@ -75,17 +74,30 @@ def _linear_svc_model(X_train, y_train, X_val, y_val, class_weight=None):
                 feature_importance_fn=_linear_svc_feature_importance, calibration=True)
 
 
+### SVC ###
+
+def _svc_model(X_train, y_train, X_val, y_val, class_weight=None):
+    params = {
+        'C': [1],
+        'kernel': ['rbf', 'poly'],
+        # 'class_weight': [None, 'balanced']
+    }
+    model = SVC(probability=True, class_weight=class_weight, random_state=SEED, verbose=VERBOSE)  # max_iter=10000
+    
+    return _fit(X_train, y_train, X_val, y_val, model, params=params)
+
+
 ### MLP ###
 
 def _mlp_model(X_train, y_train, X_val, y_val):  #, class_weight=None):
     params = {
         'hidden_layer_sizes': [(128, 256, 128)],  # [(128,), (64, 128, 64), (128, 128, 128)], (256, 256)]
-        'activation': ['relu'],  #, 'tanh'],
+        'activation': ['relu'],  # 'tanh'],
         'solver': ['adam'],
-        'alpha': [1e-3],  # 0.0001, 
+        'alpha': [1e-3],  # 1e-3,  
         'learning_rate': ['constant'],  # 'adaptive'
     }
-    model = MLPClassifier(max_iter=10000, early_stopping=True, validation_fraction=0.05, n_iter_no_change=20, 
+    model = MLPClassifier(max_iter=100, early_stopping=True, validation_fraction=0.05, n_iter_no_change=10, 
                           random_state=SEED, verbose=VERBOSE)
     
     return _fit(X_train, y_train, X_val, y_val, model, params=params)
@@ -102,11 +114,12 @@ def _tree_based_feature_importance(model, X, y):
 
 def _random_forest_model(X_train, y_train, X_val, y_val, class_weight=None):
     params = {
-        'n_estimators': [400],  # [100, 200, 400],
-        'max_depth': [None, 18],  # [None, 6, 12, 18],
-        'min_samples_split': [5],  # [2, 5, 10],
-        'min_samples_leaf': [2],  # [1, 2, 4],
-        'max_features': ['sqrt'],  # ['sqrt', 'log2', None],
+        'n_estimators': [300],  # [100, 200, 400],
+        'criterion': ['gini'],  # ['gini', 'entropy'],
+        'max_depth': [None, 6, 12],  # [None, 6, 12, 18],
+        # 'min_samples_split': [2, 5],  # [2, 5, 10],
+        # 'min_samples_leaf': [1],  # [1, 2, 4],
+        'max_features': [None],  # ['sqrt', 'log2', None],
         'bootstrap': [True],  # , [True, False],
         # 'class_weight': [None, 'balanced'],
     }
@@ -121,9 +134,9 @@ def _random_forest_model(X_train, y_train, X_val, y_val, class_weight=None):
 def _xgboost_model(X_train, y_train, X_val, y_val, class_weight=None):
     scale_pos_weight = class_weight[1] / class_weight[0] if class_weight is not None else None
     params = {
-        'n_estimators': [400],  # [100, 200, 400],
-        'max_depth': [0, 12],  # [3, 6, 9],
-        'learning_rate': [1e-2],  #, 1e-1],  # [0.01, 0.1, 0.3],
+        'n_estimators': [300],  # [100, 200, 400],
+        'max_depth': [0, 6, 12],  # [3, 6, 9],
+        'learning_rate': [0.01, 0.1],  # [0.01, 0.1, 0.3],
         'subsample': [0.8],  # [0.8, 1.0],
         'colsample_bytree': [0.8],  # [0.8, 1.0],
         # 'gamma': [0],  # [0, 0.1],
@@ -132,8 +145,8 @@ def _xgboost_model(X_train, y_train, X_val, y_val, class_weight=None):
         # 'tree_method': ['auto'],
         # 'scale_pos_weight': [1, scale_pos_weight],
     }
-    model = XGBClassifier(eval_metric='logloss', scale_pos_weight=scale_pos_weight, 
-                          random_state=SEED, n_jobs=N_JOBS, verbosity=VERBOSE)
+    model = XGBClassifier(objective='binary:logistic', eval_metric='logloss', num_parallel_tree=3,
+                          scale_pos_weight=scale_pos_weight, random_state=SEED, verbosity=VERBOSE)
     
     return _fit(X_train, y_train, X_val, y_val, 
                 model, params=params, 
@@ -260,15 +273,16 @@ def _feature_importance(model, X, y):
     return ranked_pfi
 
 
-def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, save_dir, class_weight=None):
+def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, class_weight=None, return_pfi=True, save_dir="output"):
     """
     Train and evaluate multiple machine learning models, saving the trained models and their results.
     Parameters:
         Xy_train (tuple): A tuple containing the training features and labels.
         Xy_validation (tuple): A tuple containing the validation features and labels.
         Xy_test (tuple): A tuple containing the testing features and labels.
-        save_dir (str): The directory where the models and results will be saved.
         class_weight (dict, optional): Class weights for imbalanced datasets. Defaults to None.
+        return_pfi (bool, optional): Whether to calculate permutation feature importance. Defaults to True.
+        save_dir (str): The directory where the models and results will be saved.
     Returns:
         tuple: A tuple containing the path to the results CSV file and a DataFrame with the results.
     
@@ -305,7 +319,7 @@ def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, save_dir, class_
             model, train_info = train_fn(*Xy_train, *Xy_validation, **train_kwargs)  #, class_weight=class_weight)
             logging.info(f"Evaluating {model_name} Model...")
             metrics = _evaluate_model(model, *Xy_test)
-            ranked_pfi = _feature_importance(model, *Xy_test)
+            ranked_pfi = _feature_importance(model, *Xy_test) if return_pfi else None
             
             logging.info(f"Saving {model_name} model to {model_save_path}")
             with open(model_save_path, 'wb') as f:
@@ -324,6 +338,7 @@ def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, save_dir, class_
     for model_name, train_fn in [
         ('logistic_regression', _logistic_regression_model),
         ('linear_svc', _linear_svc_model),
+        # ('svc', _svc_model),
         ('mlp', _mlp_model),
         ('random_forest', _random_forest_model),
         ('xgboost', _xgboost_model),
@@ -336,7 +351,10 @@ def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, save_dir, class_
                 continue
         best_model, results_model = _train_and_evaluate(model_name, train_fn, **train_kwargs)
         results.append(results_model)
-        estimators.append((model_name, best_model))
+        
+        # Add the best models to the estimators list for the Stacking Classifier
+        if model_name in ['mlp', 'random_forest', 'xgboost']:
+            estimators.append((model_name, best_model))
     
     # Stacking Classifier
     best_stacking, results_stacking = _train_and_evaluate('stacking', _stacking_model, estimators=estimators)
@@ -350,14 +368,16 @@ def train_and_evaluate_models(Xy_train, Xy_validation, Xy_test, save_dir, class_
     return results_path, results_df
     
 
-def claim_prediction(input_path, test_size=0.1, balance_strategy=None, outlier_strategy=None, outlier_boundary_method=None, save_dir="output"):
+def claim_prediction(input_path, test_size=0.1, balance_strategy=None, outlier_strategy=None, outlier_boundary_method=None, return_pfi=True, save_dir="output"):
     """
     Claim Prediction API: Reads the input data, preprocesses it, trains and evaluates models, and saves the results.
     Args:
         input_path (str): Path to the input CSV file containing the data.
         test_size (float, optional): The proportion of the data to be used for each of the test and validation sets. Defaults to 0.1.
+        balance_strategy (str, optional): Strategy to handle class imbalance (e.g., 'class_weight', 'SMOTE', 'ADASYN'). Defaults to None.
         outlier_strategy (str, optional): Strategy to handle outliers (e.g., 'cap', 'remove'). Defaults to None.
         outlier_boundary_method (str, optional): Method to determine outlier boundaries (e.g., 'IQR', 'percentile'). Defaults to None.
+        return_pfi (bool, optional): Whether to perform permutation feature importance. Defaults to True.
         save_dir (str, optional): Directory to save the output results and logs. Defaults to "output".
     Returns:
         tuple: A tuple containing the path to the results CSV file and a DataFrame with the results.
@@ -389,12 +409,12 @@ def claim_prediction(input_path, test_size=0.1, balance_strategy=None, outlier_s
                                 outlier_strategy=outlier_strategy, outlier_boundary_method=outlier_boundary_method)
 
     # Train and evaluate models
-    y_train_value_counts = Xy_splits['train'][1].value_counts()
-    class_weight = {
-        0: 1, 
-        1: y_train_value_counts[0] / y_train_value_counts[1]
-    } if balance_strategy == 'class_weight' else None
-    return train_and_evaluate_models(Xy_splits['train'], Xy_splits['validation'], Xy_splits['test'], save_dir, class_weight=class_weight)
+    class_weight = None
+    if balance_strategy == 'class_weight':
+        y_train_value_counts = Xy_splits['train'][1].value_counts()
+        class_weight = {0: 1, 1: y_train_value_counts[0] / y_train_value_counts[1]}
+    return train_and_evaluate_models(Xy_splits['train'], Xy_splits['validation'], Xy_splits['test'], 
+                                     class_weight=class_weight, return_pfi=return_pfi, save_dir=save_dir)
     
     
 if __name__ == "__main__":
@@ -404,10 +424,12 @@ if __name__ == "__main__":
     parser.add_argument('--balance_strategy', type=str, default=None, help='Class imbalance handling strategy (None, class_weight, SMOTE, ADASYN)')
     parser.add_argument('--outlier_strategy', type=str, default=None, help='Outlier handling strategy (None, cap, remove)')
     parser.add_argument('--outlier_boundary_method', type=str, default=None, help='Outlier boundary method (None, IQR, percentile)')
+    parser.add_argument('--return_pfi', type=bool, default=True, help='Whether to perform permutation feature importance')
     parser.add_argument('--save_dir', type=str, default="output", help='Directory to save best models, parameters, results, and logs')
     args = parser.parse_args()
     
     claim_prediction(input_path=args.input_path, test_size=args.test_size,
                      balance_strategy=args.balance_strategy,
                      outlier_strategy=args.outlier_strategy, outlier_boundary_method=args.outlier_boundary_method, 
+                     return_pfi=args.return_pfi,
                      save_dir=args.save_dir)

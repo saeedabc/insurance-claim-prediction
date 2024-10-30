@@ -1,5 +1,6 @@
 import logging
 
+import pandas as pd
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import SMOTE, ADASYN
@@ -11,6 +12,8 @@ N_JOBS = -1
 
 
 def _encode_categoricals(df):
+    logging.info("Encoding categorical variables: Gender, Vehicle_Age, and Previous_Vehicle_Damage")
+    
     # Gender
     df['Gender'] = df['Gender'].map({'Male': 1, 'Female': 0})
 
@@ -24,42 +27,9 @@ def _encode_categoricals(df):
     return df
 
 
-def _outlier_boundaries(df, col, method):
-    if method == 'IQR':
-        Q1 = df[col].quantile(0.25)
-        Q3 = df[col].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        return lower_bound, upper_bound
-    elif method == 'percentile':
-        lower_bound = df[col].quantile(0.01)
-        upper_bound = df[col].quantile(0.99)
-        return lower_bound, upper_bound
-    else:
-        raise ValueError("Please specify the method as 'IQR' or 'percentile'")
-    
-
-def _handle_outliers(df, col, strategy, boundary_method):
-    logging.info(f"Handling outliers for '{col}' using '{strategy}' strategy and '{boundary_method}' method")
-    lower_bound, upper_bound = _outlier_boundaries(df, col, method=boundary_method)
-    if strategy == 'cap':
-        df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
-    elif strategy == 'remove':
-        df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
-    else:
-        raise ValueError("Please specify the strategy as 'cap' or 'remove'")
-    return df
-
-
-def _scale_numericals(df):
-    # df[['Age', 'Annual_Premium']] = StandardScaler().fit_transform(df[['Age', 'Annual_Premium']])    
-    df['Age'] = StandardScaler().fit_transform(df[['Age']])
-    df['Annual_Premium'] = RobustScaler().fit_transform(df[['Annual_Premium']])
-    return df
-
-
 def _train_test_split(X, y, test_size=0.1, validation_size=0.1):
+    logging.info(f"Splitting the data into train, validation, and test sets (test_size={test_size}, validation_size={validation_size})")
+    
     n = X.shape[0]
     if isinstance(test_size, float):
         test_size = int(test_size * n)
@@ -76,18 +46,66 @@ def _train_test_split(X, y, test_size=0.1, validation_size=0.1):
         X_train, y_train, test_size=validation_size, stratify=y_train, random_state=SEED
     )
     
-    logging.info(f"Train: {X_train.shape}, {y_train.shape} | " + \
-                 f"Validation: {X_val.shape}, {y_val.shape} | " + \
-                 f"Test: {X_test.shape}, {y_test.shape}")
-    
     return {
         'train': (X_train, y_train), 
         'validation': (X_val, y_val),
         'test': (X_test, y_test)
     }
+   
+
+def _handle_outliers(Xy_splits, strategy='cap', boundary_method='IQR'):
+    logging.info(f"Handling outliers using '{strategy}' strategy and '{boundary_method}' boundary method")
+    
+    def _outlier_boundaries(X, col, method):
+        if method == 'IQR':
+            Q1 = X[col].quantile(0.25)
+            Q3 = X[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            return lower_bound, upper_bound
+        elif method == 'percentile':
+            lower_bound = X[col].quantile(0.01)
+            upper_bound = X[col].quantile(0.99)
+            return lower_bound, upper_bound
+        else:
+            raise ValueError("Please specify the method as 'IQR' or 'percentile'")
+        
+    for col in ['Age', 'Annual_Premium']:
+        # Calculate the boundaries based on the training set
+        lower_bound, upper_bound = _outlier_boundaries(Xy_splits['train'][0], col, method=boundary_method)
+    
+        if strategy == 'cap':
+            # Cap the outliers in all splits
+            for split in Xy_splits:
+                Xy_splits[split][0][col] = Xy_splits[split][0][col].clip(lower=lower_bound, upper=upper_bound)
+        elif strategy == 'remove':
+            # Remove the outliers only from the training set (Added for comparison purposes, not recommended in practice)
+            filter = (Xy_splits['train'][0][col] >= lower_bound) & (Xy_splits['train'][0][col] <= upper_bound)
+            Xy_splits['train'] = (Xy_splits['train'][0][filter], Xy_splits['train'][1][filter])
+        else:
+            raise ValueError("Please specify the strategy as 'cap' or 'remove'")
+    
+    return Xy_splits
+
+
+def _scale_numericals(Xy_splits):
+    logging.info("Scaling numerical variables: 'Age' and 'Annual_Premium'")
+    
+    age_scaler = StandardScaler().fit(Xy_splits['train'][0][['Age']])
+    for split in Xy_splits:
+        Xy_splits[split][0]['Age'] = age_scaler.transform(Xy_splits[split][0][['Age']])
+    
+    # premium_scaler = RobustScaler().fit(Xy_splits['train'][0][['Annual_Premium']])
+    premium_scaler = StandardScaler().fit(Xy_splits['train'][0][['Annual_Premium']])
+    for split in Xy_splits:
+        Xy_splits[split][0]['Annual_Premium'] = premium_scaler.transform(Xy_splits[split][0][['Annual_Premium']])
+    
+    return Xy_splits
     
 
 def _handle_class_imbalance(X, y, strategy='SMOTE'):
+    logging.info(f"Handling class imbalance using '{strategy}' strategy")
     if strategy == 'SMOTE':
         smote = SMOTE(random_state=SEED, n_jobs=N_JOBS)
         return smote.fit_resample(X, y)
@@ -112,29 +130,43 @@ def preprocess_data(df, test_size=0.1, balance_strategy=None, outlier_strategy=N
         dict: A dictionary containing the train, validation, and test splits of the preprocessed data.
     """
     
+    def _log_shape(data, prefix=""):
+        if isinstance(data, dict):
+            info = " | ".join([f"{split.capitalize()}: {X.shape}, {y.shape}" for split, (X, y) in data.items()])
+            logging.info(f"{prefix}: {info}")
+        elif isinstance(data, tuple):
+            X, y = data
+            logging.info(f"{prefix}: X: {X.shape}, y: {y.shape}")
+        elif isinstance(data, pd.DataFrame):
+            logging.info(f"{prefix}: {data.shape}")
+        else:
+            raise ValueError("Invalid data type")
+    
     # Drop irrelevant columns
     df = df.drop(['Claim ID'], axis=1)
     
     # Encode categorical variables
     df = _encode_categoricals(df)
     
-    # Handle outliers in 'Annual_Premium' column
-    if outlier_strategy:
-        df = _handle_outliers(df, col='Annual_Premium', strategy=outlier_strategy, boundary_method=outlier_boundary_method)
-    
-    # Scale numerical variables
-    df = _scale_numericals(df)
-    
     # Features and target variable
     X = df.drop('Response', axis=1)
     y = df['Response']
-    logging.info(f"X: {X.shape}, y: {y.shape}")
-    
-    if balance_strategy in ['SMOTE', 'ADASYN']:
-        X, y = _handle_class_imbalance(X, y, strategy=balance_strategy)
-        logging.info(f"X (balanced): {X.shape}, y (balanced): {y.shape}")
+    _log_shape((X, y), prefix="Initial data")
     
     # Train-test split
     Xy_splits = _train_test_split(X, y, test_size=test_size, validation_size=test_size)
 
+    # Handle outliers in 'Annual_Premium' column based on the training set
+    if outlier_strategy:
+        Xy_splits = _handle_outliers(Xy_splits, strategy=outlier_strategy, boundary_method=outlier_boundary_method)
+    
+    # Scale numerical variables based on the training set
+    Xy_splits = _scale_numericals(Xy_splits)
+
+    # Handle class imbalance only for the training set
+    if balance_strategy in ['SMOTE', 'ADASYN']:
+        Xy_splits['train'] = _handle_class_imbalance(*Xy_splits['train'], strategy=balance_strategy)
+
+    _log_shape(Xy_splits, prefix="Final data")
+    
     return Xy_splits
